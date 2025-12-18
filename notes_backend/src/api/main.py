@@ -15,10 +15,26 @@ DATABASE_URL = os.getenv(
     "postgresql://postgres:postgres@localhost:5001/postgres",
 )
 
-# SQLAlchemy engine and session
-engine = create_engine(DATABASE_URL, echo=False, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+# IMPORTANT: defer engine creation to runtime to avoid crashing import if DB is unavailable.
+_engine = None
+_SessionLocal = None
 Base = declarative_base()
+
+
+def _get_engine():
+    """Return a singleton SQLAlchemy engine, creating it lazily when first needed."""
+    global _engine
+    if _engine is None:
+        _engine = create_engine(DATABASE_URL, echo=False, future=True)
+    return _engine
+
+
+def _get_session_factory():
+    """Return a singleton session factory, creating it lazily when first needed."""
+    global _SessionLocal
+    if _SessionLocal is None:
+        _SessionLocal = sessionmaker(bind=_get_engine(), autoflush=False, autocommit=False, future=True)
+    return _SessionLocal
 
 
 class Note(Base):
@@ -32,8 +48,10 @@ class Note(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-# Create tables if they don't exist
-Base.metadata.create_all(bind=engine)
+def _ensure_tables():
+    """Create tables if they do not exist. Called on first DB access."""
+    engine = _get_engine()
+    Base.metadata.create_all(bind=engine)
 
 
 # FastAPI app with metadata and tags
@@ -47,10 +65,10 @@ app = FastAPI(
     ],
 )
 
-# CORS configuration: allow frontend origin
+# CORS configuration: allow frontend origin and typical dev hosts
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -59,6 +77,9 @@ app.add_middleware(
 
 def get_db():
     """Dependency to provide a database session and ensure it is closed."""
+    # Lazily initialize engine, session factory and tables upon first DB usage
+    SessionLocal = _get_session_factory()
+    _ensure_tables()
     db = SessionLocal()
     try:
         yield db
@@ -94,7 +115,12 @@ class NoteRead(NoteBase):
 # Routes
 
 # PUBLIC_INTERFACE
-@app.get("/", tags=["health"], summary="Health Check", description="Returns a simple message indicating the service is healthy.")
+@app.get(
+    "/",
+    tags=["health"],
+    summary="Health Check",
+    description="Returns a simple message indicating the service is healthy.",
+)
 def health_check():
     """Health endpoint to verify service status."""
     return {"message": "Healthy"}
